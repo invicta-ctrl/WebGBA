@@ -19,7 +19,7 @@ A Game Boy Advance emulator that runs entirely in your browser. The emulation is
 
 ### Verify the binary
 `core/mgba.wasm` SHA-256:
-`07108af52f45b53943f76074102a86931cb096647447844ad2ddaadb4a2b36ea`
+`e8ce9d7534e54b25138f74343c772add6629f3263fa49424c6efccd33eaf36e7`
 
 ## Importing ROMs and ZIP files safely
 
@@ -36,6 +36,6 @@ Save data is held in local browser storage and may be evicted. Export a backup p
 
 ## Security and rebuild status
 
-The JavaScript guards and ZIP/save validations ship directly from this repository's source. `build/wasm_api.c` also adds native allocation checks; **they are not active in the bundled `core/mgba.wasm` until that binary has been successfully rebuilt and its checksum updated**. See the separate `Rebuild mGBA for verification` workflow and `build/build-core.sh`. Do not treat this change as a complete WASM memory-safety audit.
+The JavaScript guards and ZIP/save validations ship directly from this repository's source. `build/wasm_api.c` also adds native allocation checks; **the included `core/mgba.wasm` is rebuilt with these allocation checks, as recorded in the checksum above**. See the separate `Rebuild mGBA for verification` workflow and `build/build-core.sh`. Do not treat this change as a complete WASM memory-safety audit.
 
 Regression tests: `node --test tests/*.test.cjs` (Node.js 22+). Browser checks: `node --check engine.js && node --check ui.js`. Verify real Safari / Android device playback, ROM import, audio, save/load and orientation before production release.
