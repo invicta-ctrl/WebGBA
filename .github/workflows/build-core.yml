@@ -2,6 +2,10 @@ name: Rebuild mGBA for verification
 on:
   push:
     branches: [fix/safari-security-save-integrity]
+    paths:
+      - build/wasm_api.c
+      - build/build-core.sh
+      - .github/workflows/build-core.yml
   workflow_dispatch:
 permissions:
   contents: read
