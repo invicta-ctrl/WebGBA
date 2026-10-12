@@ -3,7 +3,7 @@
 A Game Boy Advance emulator that runs entirely in your browser. The emulation is
 [mGBA](https://mgba.io) 0.10.5 compiled to WebAssembly; the interface is React.
 
-**Play:** https://erinpanes052204.github.io/WebGBA/
+**Upstream demo (does not include this fork's pending patches):** https://erinpanes052204.github.io/WebGBA/
 
 - **Bring your own games.** No ROMs, BIOS files or cover art are included or ever will be.
   Use only games you own.
@@ -12,7 +12,7 @@ A Game Boy Advance emulator that runs entirely in your browser. The emulation is
 - **Mobile:** Touch controls, responsive portrait/landscape layouts, and a **Tap to enable sound** recovery control are implemented. iOS Safari and Android Chrome still require real-device acceptance testing; do not treat these browsers as verified yet.
 
 ## Where the code comes from
-- `core/mgba.wasm` is **unmodified** mGBA 0.10.5 ([source](https://github.com/mgba-emu/mgba/tree/0.10.5),
+- `core/mgba.wasm` is built from **unmodified upstream mGBA 0.10.5 sources** ([source](https://github.com/mgba-emu/mgba/tree/0.10.5),
   MPL-2.0, see `LICENSE-mGBA.txt`) plus a small glue file, `build/wasm_api.c`.
   Rebuild it yourself with `build/build-core.sh` (needs Emscripten).
 - `vendor/` holds React and htm (MIT), bundled so the page loads nothing from third parties.
@@ -24,7 +24,7 @@ A Game Boy Advance emulator that runs entirely in your browser. The emulation is
 ## Importing ROMs and ZIP files safely
 
 Click **Open ROM** to choose a local `.gba` file (or a ZIP containing one).
-The archive is inspected **in the browser, without a database or upload**. The importer checks central-directory boundaries, entry counts, encryption/compression flags, paths, declared size limits, actual extracted length and CRC-32 before loading files. CRC-32 is a corruption check, not malware detection. ZIP uploads have a 64 MiB per-entry and 512 MiB total expanded-size limit; game ROMs are limited to 32 MiB. Older Safari browsers that lack `DecompressionStream('deflate-raw')` can import uncompressed `.gba` files directly instead. Unsupported or malformed archives should fail safely.
+The archive is inspected **in the browser, without a database or upload**. The importer checks central-directory boundaries, entry counts, encryption/compression flags, paths, declared size limits, actual extracted length and CRC-32 before loading files. A backup is validated in full before any restore writes begin. CRC-32 is a corruption check, not malware detection. ZIP uploads have a 64 MiB per-entry and 512 MiB total expanded-size limit; game ROMs are limited to 32 MiB. Older Safari browsers that lack `DecompressionStream('deflate-raw')` can import uncompressed `.gba` files directly instead. Unsupported or malformed archives should fail safely.
 
 Game identity now uses a SHA-256 content fingerprint to keep patched variants' saves separate. Existing saves and save states retain a read-only legacy-ID fallback; export a backup before modifying your library. When importing a `.sav` during play, the app attempts to download a backup of current in-memory save data first.
 
