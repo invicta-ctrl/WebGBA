@@ -21,7 +21,7 @@ const ROM_RE = /\.(gba|agb|bin|mb)$/i;
 
 /* ------------------------------------------------------------ observable state */
 let state = {
-  ready: false, serverMode: false, running: false, paused: false, turbo: false,
+  ready: false, serverMode: false, running: false, paused: false, turbo: false, audioStatus: 'off',
   title: '', romName: '', id: '', fps: 0, library: [], libHint: '', config: defaults(),
   toast: null, busy: null, dragging: false, flash: 0, bios: false,
   pad: { connected: false, family: 'generic', name: '' }, input: 'mouse', padListening: null,
@@ -35,7 +35,7 @@ const R = { kbd: 0, pad: 0, touch: 0, acc: 0, last: 0, frames: 0, fpsAt: 0, dirt
   lastSave: null, lastRom: null, codes: {}, overlayPaused: false, autoPaused: false, dec: { n: 0, l: 0, r: 0 },
   glowAt: 0, gc: null, canvas: null, ctx: null, drag: 0,
   input: 0, combo: false, rep: {}, padPrev: new Set(), nav: { active: false, handler: null }, menuCb: null,
-  turboSticky: false, turboKbd: false, turboPad: false, listen: null, listenT: 0, coverT: 0 };
+  turboSticky: false, turboKbd: false, turboPad: false, listen: null, listenT: 0, coverT: 0, importing: false, legacyId: '' };
 const glowCanvas = document.createElement('canvas'); glowCanvas.width = 4; glowCanvas.height = 3;
 const gctx = glowCanvas.getContext('2d', { willReadFrequently: true });
 
@@ -91,7 +91,8 @@ const store = {
   },
   async putConfig(obj) {
     const txt = JSON.stringify(obj);
-    if (this.server) await fetch('/api/config', { method: 'PUT', body: txt }); else localStorage.setItem('webgba.config', txt);
+    if (this.server) { const r = await fetch('/api/config', { method: 'PUT', body: txt }); if (!r.ok) throw new Error('server refused config write'); }
+    else localStorage.setItem('webgba.config', txt);
   },
 };
 
@@ -180,10 +181,12 @@ const Core = {
   m: null,
   async init() { this.m = await createMgba({ locateFile: (f) => 'core/' + f }); },
   heap() { return this.m.HEAPU8; },
-  put(bytes) { const p = this.m._wg_alloc(bytes.length); this.m.HEAPU8.set(bytes, p); return p; },
+  put(bytes) { const p = this.m._wg_alloc(bytes.length); if (!p) throw new Error('Not enough emulator memory'); this.m.HEAPU8.set(bytes, p); return p; },
   load(rom, save, bios) {
     const m = this.m;
     if (bios) { const p = this.put(bios); m._wg_set_bios(p, bios.length); m._wg_free(p); } else m._wg_set_bios(0, 0);
+    if (save && save.length > SAVE_MAX) throw new Error('Stored save exceeds 128 KB');
+    if (bios && bios.length !== 16384) throw new Error('Invalid BIOS size');
     if (save) { const p = this.put(save); m._wg_set_pending_save(p, save.length); m._wg_free(p); } else m._wg_set_pending_save(0, 0);
     const p = this.put(rom), ok = m._wg_load_rom(p, rom.length);
     m._wg_free(p);
@@ -220,17 +223,35 @@ class P extends AudioWorkletProcessor {
 }
 registerProcessor('gba-audio', P);`;
 async function ensureAudio() {
-  if (R.audio) { if (R.audio.ctx.state === 'suspended') R.audio.ctx.resume(); return; }
+  if (R.audio) {
+    if (R.audio.ctx.state !== 'running') {
+      // Do not await resume: on Safari it can remain pending until the next tap.
+      R.audio.ctx.resume().catch((e) => console.warn('Audio resume needs a tap', e));
+      set({ audioStatus: 'tap' });
+    } else set({ audioStatus: 'ready' });
+    return;
+  }
   try {
-    const ctx = new AudioContext({ sampleRate: Core.m._wg_sample_rate(), latencyHint: 'interactive' });
-    await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'text/javascript' })));
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) throw new Error('Web Audio is unavailable');
+    const ctx = new Ctx({ sampleRate: Core.m._wg_sample_rate(), latencyHint: 'interactive' });
+    const url = URL.createObjectURL(new Blob([WORKLET], { type: 'text/javascript' }));
+    try { await ctx.audioWorklet.addModule(url); }
+    finally { URL.revokeObjectURL(url); }
     const node = new AudioWorkletNode(ctx, 'gba-audio', { outputChannelCount: [2] }), gain = ctx.createGain();
     node.connect(gain).connect(ctx.destination);
     node.port.onmessage = (e) => { R.level = e.data; };
     R.audio = { ctx, node, gain }; applyVolume();
-    if (ctx.state === 'suspended') ctx.resume();
-  } catch (e) { console.warn('audio unavailable', e); toast('Audio unavailable in this browser'); }
+    ctx.onstatechange = () => set({ audioStatus: ctx.state === 'running' ? 'ready' : 'tap' });
+    set({ audioStatus: ctx.state === 'running' ? 'ready' : 'tap' });
+    if (ctx.state === 'suspended') ctx.resume().catch((e) => console.warn('Audio waiting for tap', e));
+  } catch (e) {
+    console.warn('audio unavailable', e);
+    set({ audioStatus: 'unavailable' }); toast('Sound unavailable; games can still run');
+  }
 }
+const unlockAudio = () => { if (Core.m) ensureAudio(); };
+
 function applyVolume() { if (R.audio) R.audio.gain.gain.value = (state.config.settings.vol / 100) ** 2; }
 function pushAudio() {
   const a = R.audio; if (!a) return;
@@ -396,7 +417,12 @@ addEventListener('gamepaddisconnected', () => setPadInfo(null));
 const touchSet = (bit, on) => { R.touch = on ? R.touch | bit : R.touch & ~bit; };
 
 /* --------------------------------------------------------------------- zip I/O */
-const ZIP_LIMIT = 64 * 1024 * 1024;   // no single file inside a zip may expand past this (zip-bomb guard)
+const ZIP_LIMIT = 64 * 1024 * 1024; // Individual entry cap
+const ZIP_TOTAL_LIMIT = 512 * 1024 * 1024;
+const ZIP_CD_LIMIT = 4 * 1024 * 1024;
+const ZIP_ENTRY_LIMIT = 1024;
+const ROM_MAX = 32 * 1024 * 1024;
+const SAVE_MAX = 128 * 1024;
 async function inflateRaw(b) {
   const rd = new Blob([b]).stream().pipeThrough(new DecompressionStream('deflate-raw')).getReader(), parts = [];
   let n = 0;
@@ -419,30 +445,58 @@ async function crcBlob(blob) {
 }
 /* Reads straight from the File with slice(), so even a multi-GB backup never sits in memory. */
 async function zipEntries(file) {
+  if (file.size < 22) throw new Error('ZIP is too short');
   const tl = Math.min(file.size, 65557), tail = new DataView(await file.slice(file.size - tl).arrayBuffer());
-  let e = tl - 22; while (e >= 0 && tail.getUint32(e, true) !== 0x06054b50) e--;
-  if (e < 0) throw new Error('not a valid zip');
+  let e = tl - 22;
+  while (e >= 0 && tail.getUint32(e, true) !== 0x06054b50) e--;
+  if (e < 0 || e + 22 + tail.getUint16(e + 20, true) !== tl) throw new Error('invalid ZIP end record');
   const count = tail.getUint16(e + 10, true), cdSize = tail.getUint32(e + 12, true), cdOff = tail.getUint32(e + 16, true);
+  if (tail.getUint16(e + 4, true) || tail.getUint16(e + 6, true) || tail.getUint16(e + 8, true) !== count)
+    throw new Error('multi-volume ZIP is unsupported');
+  if (count > ZIP_ENTRY_LIMIT || cdSize > ZIP_CD_LIMIT || count === 0xffff || cdOff === 0xffffffff)
+    throw new Error('ZIP exceeds supported limits');
+  if (cdOff + cdSize > file.size - tl + e) throw new Error('invalid ZIP directory offset');
   const cd = new DataView(await file.slice(cdOff, cdOff + cdSize).arrayBuffer()), dec = new TextDecoder(), out = [];
-  let p = 0;
-  for (let i = 0; i < count && p + 46 <= cd.byteLength; i++) {
-    if (cd.getUint32(p, true) !== 0x02014b50) break;
+  let p = 0, total = 0;
+  for (let i = 0; i < count; i++) {
+    if (p + 46 > cd.byteLength || cd.getUint32(p, true) !== 0x02014b50) throw new Error('corrupt ZIP directory');
+    const flags = cd.getUint16(p + 8, true), method = cd.getUint16(p + 10, true);
     const nl = cd.getUint16(p + 28, true), el = cd.getUint16(p + 30, true), cl = cd.getUint16(p + 32, true);
-    out.push({ method: cd.getUint16(p + 10, true), csize: cd.getUint32(p + 20, true), usize: cd.getUint32(p + 24, true), lho: cd.getUint32(p + 42, true),
-      name: dec.decode(new Uint8Array(cd.buffer, p + 46, nl)) });
+    const csize = cd.getUint32(p + 20, true), usize = cd.getUint32(p + 24, true), lho = cd.getUint32(p + 42, true);
+    if (p + 46 + nl + el + cl > cd.byteLength || (flags & 1) || (method !== 0 && method !== 8) ||
+        csize > ZIP_LIMIT || usize > ZIP_LIMIT || lho === 0xffffffff || lho + 30 > cdOff)
+      throw new Error('unsupported or oversized ZIP entry');
+    total += usize;
+    if (total > ZIP_TOTAL_LIMIT) throw new Error('ZIP total expanded size exceeds limit');
+    const name = dec.decode(new Uint8Array(cd.buffer, p + 46, nl));
+    if (name.includes('\\') || name.startsWith('/') || name.split('/').includes('..') || !name)
+      throw new Error('unsafe ZIP path');
+    out.push({ method, flags, csize, usize, lho, crc: cd.getUint32(p + 16, true), name });
     p += 46 + nl + el + cl;
   }
+  if (p !== cd.byteLength) throw new Error('ZIP directory contains unexpected data');
   return out;
 }
 async function zipRead(file, e) {
-  if (e.csize > ZIP_LIMIT || e.usize > ZIP_LIMIT) throw new Error('a file inside the zip is too large');
+  if (e.csize > ZIP_LIMIT || e.usize > ZIP_LIMIT) throw new Error('ZIP entry exceeds limit');
   const lh = new DataView(await file.slice(e.lho, e.lho + 30).arrayBuffer());
+  if (lh.byteLength !== 30 || lh.getUint32(0, true) !== 0x04034b50 ||
+      lh.getUint16(8, true) !== e.method || lh.getUint16(6, true) !== e.flags)
+    throw new Error('invalid ZIP local header');
   const start = e.lho + 30 + lh.getUint16(26, true) + lh.getUint16(28, true);
+  if (start + e.csize > file.size) throw new Error('truncated ZIP entry');
   const raw = new Uint8Array(await file.slice(start, start + e.csize).arrayBuffer());
-  if (e.method === 0) return raw;
-  if (e.method === 8) return inflateRaw(raw);
-  throw new Error('unsupported zip compression');
+  let bytes;
+  if (e.method === 0) bytes = raw;
+  else {
+    if (typeof DecompressionStream === 'undefined') throw new Error('ZIP decompression unavailable; open a .gba file directly');
+    bytes = await inflateRaw(raw);
+  }
+  if (bytes.length !== e.usize || crc32(bytes) !== e.crc)
+    throw new Error('ZIP entry failed size/CRC validation');
+  return bytes;
 }
+
 class ZipWriter {
   constructor() { this.parts = []; this.cd = []; this.off = 0; }
   async add(name, data, { compress = true } = {}) {
@@ -487,12 +541,16 @@ function download(name, data, type = 'application/octet-stream') {
 }
 
 /* ------------------------------------------------------------------ ROM loading */
-function romId(rom) {
+function legacyRomId(rom) {
   const txt = (a, b) => String.fromCharCode(...rom.subarray(a, b)).replace(/[^A-Za-z0-9]/g, '');
   const code = txt(0xAC, 0xB0), title = txt(0xA0, 0xAC);
   if (code.length === 4) return `${code}_${title}`.slice(0, 40);
   let h = 2166136261; for (let i = 0; i < rom.length; i += 17) h = Math.imul(h ^ rom[i], 16777619);
   return 'rom_' + (h >>> 0).toString(16);
+}
+async function romId(rom) {
+  const digest = await crypto.subtle.digest('SHA-256', rom);
+  return 'sha256_' + [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 async function openFile(file) {
   try {
@@ -501,8 +559,9 @@ async function openFile(file) {
     if (/\.zip$/i.test(name) || (head[0] === 0x50 && head[1] === 0x4B)) {
       const e = (await zipEntries(file)).find((x) => ROM_RE.test(x.name));
       if (!e) throw new Error('no .gba file inside the zip');
+      if (e.usize < 0xC0 || e.usize > ROM_MAX) throw new Error('ROM inside ZIP exceeds supported size');
       bytes = await zipRead(file, e); name = e.name.split('/').pop();
-    } else bytes = new Uint8Array(await file.arrayBuffer());
+    } else { if (file.size < 0xC0 || file.size > ROM_MAX) throw new Error('ROM exceeds supported size'); bytes = new Uint8Array(await file.arrayBuffer()); }
     if (await startRom(bytes, name)) await saveToLibrary(name, bytes);   // "open 1 game and save it"
   } catch (err) { toast('Could not open: ' + err.message); }
 }
@@ -515,21 +574,32 @@ async function saveToLibrary(name, bytes) {
 async function openLibrary(name) {
   try { await startRom(await Library.get(name), name); } catch (e) { toast('Could not load: ' + e.message); }
 }
-async function startRom(rom, name) {
+async function startRom(rom, name, opts = {}) {
   if (!Core.m) { toast('Emulator core is still loading, try again in a moment'); return false; }
-  if (rom.length < 0xC0 || rom.length > 32 * 1024 * 1024) { toast('That does not look like a GBA ROM'); return false; }
-  R.lastRom = { bytes: rom, name };
-  await saveSaveNow(); await ensureAudio();
-  const id = romId(rom); let save = null, bios = null;
-  try { save = await store.get('save', id); } catch (e) { console.warn(e); }
+  if (rom.length < 0xC0 || rom.length > ROM_MAX) { toast('That does not look like a GBA ROM'); return false; }
+  if (!opts.skipOutgoingSave && await saveSaveNow() === false) throw new Error('Previous game could not be saved; game switch cancelled');
+  if (opts.skipOutgoingSave) await saveWrites.catch(() => {});
+  await ensureAudio();
+  const id = await romId(rom), legacyId = legacyRomId(rom); let save = opts.saveOverride || null, bios = null;
+  if (!save) {
+    try { save = await store.get('save', id) || await store.get('save', legacyId); } catch (e) { console.warn(e); }
+  }
   try { const b = await idbGet('bios:gba'); bios = b ? new Uint8Array(b) : null; } catch (e) { /* optional */ }
-  if (!Core.load(rom, save, bios)) { toast('mGBA rejected this ROM'); return false; }
-  Object.assign(R, { lastSave: save, acc: 0, frames: 0, fpsAt: performance.now(), dec: { n: 0, l: 0, r: 0 }, overlayPaused: false, autoPaused: false });
+  let loaded = false;
+  try { loaded = Core.load(rom, save, bios); }
+  catch (e) { console.error('mGBA load failed', e); }
+  if (!loaded) {
+    set({ running: false, paused: false, id: '', title: '', romName: '' });
+    toast('mGBA could not load this ROM'); return false;
+  }
+  Object.assign(R, { lastRom: { bytes: rom, name }, legacyId, lastSave: save, acc: 0, frames: 0,
+    fpsAt: performance.now(), dec: { n: 0, l: 0, r: 0 }, overlayPaused: false, autoPaused: false });
   const title = String.fromCharCode(...rom.subarray(0xA0, 0xAC)).replace(/\0/g, '').trim() || name.replace(/\.[^.]+$/, '');
   R.turboSticky = false; R.turboKbd = false;
   set({ running: true, paused: false, turbo: false, id, romName: name, title });
   document.title = title + ' | WebGBA';
-  if ((state.config.cheats[id] || '').trim()) applyCheats(state.config.cheats[id], true);
+  const cheats = state.config.cheats[id] || state.config.cheats[legacyId] || '';
+  if (cheats.trim()) applyCheats(cheats, true);
   clearTimeout(R.coverT); R.coverT = setTimeout(captureCover, 8000);
   return true;
 }
@@ -577,6 +647,7 @@ async function importFiles(files) {
       if (/\.zip$/i.test(name)) {
         const e = (await zipEntries(file)).find((x) => ROM_RE.test(x.name) && !x.name.endsWith('/'));
         if (!e) { skipped++; continue; }
+        if (e.usize < 0xC0 || e.usize > ROM_MAX) { skipped++; continue; }
         bytes = await zipRead(file, e); name = e.name.split('/').pop();
       } else {
         if (file.size < 0xC0 || file.size > 32 * 1024 * 1024) { skipped++; continue; }
@@ -608,17 +679,27 @@ function captureCover() {   // the tile art is a screenshot of your own game
 /* ----------------------------------------------------------------- saves, states */
 const isBlank = (d) => { for (let i = 0; i < d.length; i++) if (d[i] !== 0xFF) return false; return true; };
 const same = (a, b) => a && b && a.length === b.length && a.every((v, i) => v === b[i]);
+let saveWrites = Promise.resolve();
+function writeSave(id, bytes) {
+  const write = saveWrites.catch(() => {}).then(() => store.put('save', id, bytes));
+  saveWrites = write;
+  return write;
+}
 async function saveSaveNow() {
-  if (!state.running || !state.id) return;
-  const d = Core.saveData();
-  if (!d || isBlank(d) || same(d, R.lastSave)) return;
-  R.lastSave = d;
-  try { await store.put('save', state.id, d); } catch (e) { toast('Could not write save: ' + e.message); }
+  if (!state.running || !state.id || R.importing) return true;
+  const d = Core.saveData(), id = state.id;
+  if (!d || isBlank(d) || same(d, R.lastSave)) return true;
+  try {
+    await writeSave(id, d);
+    if (state.id === id) R.lastSave = d;
+    return true;
+  } catch (e) { toast('Could not write save: ' + e.message); return false; }
 }
 setInterval(saveSaveNow, 2000);
 addEventListener('pagehide', saveSaveNow);
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
+    R.touch = 0; R.kbd = 0; R.turboKbd = false; applyTurbo();
     saveSaveNow();
     if (state.config.settings.pauseHidden && state.running && !state.paused) { set({ paused: true }); R.autoPaused = true; }
   } else if (R.autoPaused) { set({ paused: false }); R.autoPaused = false; }
@@ -639,7 +720,7 @@ async function saveState(n) {
 async function loadState(n) {
   if (!state.running) return;
   try {
-    const st = await store.get('state', `${state.id}/${n}`);
+    const st = await store.get('state', `${state.id}/${n}`) || (R.legacyId && await store.get('state', `${R.legacyId}/${n}`));
     if (!st) { toast(`Slot ${n} is empty`); return; }
     if (Core.stateLoad(st)) { updateConfig((c) => { c.settings.slot = n; }); toast(`Loaded slot ${n}`); stepFrame(); draw(); set({ flash: Date.now() }); } else toast('State does not match this game');
   } catch (e) { toast('Could not read state: ' + e.message); }
@@ -657,9 +738,22 @@ function applyCheats(text, silent) {
 }
 const exportSav = () => { const d = Core.saveData(); d ? download((state.title || 'game') + '.sav', d) : toast('No save data yet'); };
 async function importSav(file) {
-  if (!state.running) return;
-  try { const b = new Uint8Array(await file.arrayBuffer()); await store.put('save', state.id, b); R.lastSave = b; toast('Save imported. Restarting game...'); await startRom(R.lastRom.bytes, R.lastRom.name); }
-  catch (e) { toast('Import failed: ' + e.message); }
+  if (!state.running || R.importing) return;
+  if (!file.size || file.size > SAVE_MAX) { toast('Invalid save size (max 128 KB)'); return; }
+  const wasPaused = state.paused;
+  set({ paused: true }); R.importing = true;
+  try {
+    const b = new Uint8Array(await file.arrayBuffer());
+    // Keep a retrievable copy of the previous in-game save before replacing it.
+    const prior = Core.saveData();
+    const hasPrevious = !!prior && !isBlank(prior);
+    if (hasPrevious) download((state.title || 'game') + '-before-import.sav', prior);
+    await writeSave(state.id, b);
+    if (!await startRom(R.lastRom.bytes, R.lastRom.name, { skipOutgoingSave: true, saveOverride: b }))
+      throw new Error('emulator rejected imported save');
+    toast(hasPrevious ? 'Save imported; backup download requested' : 'Save imported');
+  } catch (e) { toast('Import failed: ' + e.message); }
+  finally { R.importing = false; if (wasPaused && state.running) set({ paused: true }); }
 }
 
 /* ---------------------------------------------------------------------- controls */
@@ -673,6 +767,7 @@ function setOverlay(on) {
 const screenshot = () => R.canvas.toBlob((b) => b && download(`${state.title || 'screenshot'}-${Date.now()}.png`, b));
 const fullscreen = () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.());
 async function setBios(file) {
+  if (file.size !== 16384) { toast('A GBA BIOS is exactly 16 KB'); return; }
   const b = new Uint8Array(await file.arrayBuffer());
   if (b.length !== 16384) { toast('A GBA BIOS is exactly 16 KB'); return; }
   await idbPut('bios:gba', b); set({ bios: true }); toast('BIOS saved. Used the next time you load a game');
@@ -706,18 +801,29 @@ async function importBackup(file) {
   const n = { saves: 0, states: 0, roms: 0, skipped: 0 };
   try {
     const ents = await zipEntries(file); let cfg = null, i = 0;
+    // Validate every archive member before mutating any save, state, or ROM record.
+    for (const e of ents) {
+      if (e.name.endsWith('/')) continue;
+      set({ busy: `Checking backup... ${++i}/${ents.length}` });
+      await zipRead(file, e);
+    }
+    const settingsEntry = ents.find((e) => e.name === 'settings.json');
+    if (settingsEntry) cfg = mergeConfig(JSON.parse(new TextDecoder().decode(await zipRead(file, settingsEntry))));
+    i = 0;
     for (const e of ents) {
       set({ busy: `Restoring ${++i}/${ents.length}` });
+      if (e.name.startsWith('saves/') && e.usize > SAVE_MAX) throw new Error('Save in backup exceeds 128 KB');
+      if (e.name.startsWith('roms/') && e.usize > ROM_MAX) throw new Error('Game in backup exceeds 32 MB');
       if (e.name.endsWith('/') || e.name.includes('..') || e.name.startsWith('/')) continue;
       let m;
-      if (e.name === 'settings.json') cfg = JSON.parse(new TextDecoder().decode(await zipRead(file, e)));
+      if (e.name === 'settings.json') continue;
       else if ((m = /^saves\/([A-Za-z0-9_.-]{1,96})\.sav$/.exec(e.name))) { await store.put('save', m[1], await zipRead(file, e)); n.saves++; }
       else if ((m = /^states\/([A-Za-z0-9_.-]{1,96})\/([A-Za-z0-9_.-]{1,16})\.state$/.exec(e.name))) { await store.put('state', `${m[1]}/${m[2]}`, await zipRead(file, e)); n.states++; }
       else if ((m = /^roms\/([^/\\]+)$/.exec(e.name))) {
         if (ROM_RE.test(m[1])) { try { await Library.add(m[1], await zipRead(file, e)); n.roms++; } catch (err) { n.skipped++; } } else n.skipped++;
       }
     }
-    if (cfg) commitConfig(mergeConfig(cfg));
+    if (cfg) commitConfig(cfg);
     await refreshLibrary();
     toast(`Restored ${n.saves} saves, ${n.states} states, ${n.roms} games${n.skipped ? ` (${n.skipped} games skipped)` : ''}`);
   } catch (e) { toast('Restore failed: ' + e.message); } finally { set({ busy: null }); }
@@ -746,12 +852,12 @@ window.GBA = {
   BTN, DEFAULT_KEYS, DEFAULT_PAD,
   attachCanvas(c) { R.canvas = c; R.ctx = c.getContext('2d', { alpha: false }); },
   openFile, openLibrary, refreshLibrary, scanFolder, removeGame, togglePause, setTurbo, setOverlay,
-  reset: () => { if (state.running) { Core.reset(); toast('Reset'); } },
+  reset: async () => { if (state.running) { if (await saveSaveNow() === false) return; Core.reset(); toast('Reset'); } },
   screenshot, fullscreen, saveState, loadState, nextSlot, applyCheats, exportSav, importSav,
   updateConfig, bindKey, resetKeys, bindPad, resetPad, listenPad, cancelListenPad,
   setNav: (active, handler) => { R.nav = { active, handler }; },   // the UI tells the engine when a menu layer is open
   setMenu: (fn) => { R.menuCb = fn; },                              // called on Select + Start
-  setBios, clearBios, exportBackup, importBackup, touchSet,
+  setBios, clearBios, exportBackup, importBackup, touchSet, unlockAudio,
   _debug: () => ({ level: R.level, turbo: state.turbo, frames: R.frames, nav: R.nav.active }),
   _import: importFiles,
 };

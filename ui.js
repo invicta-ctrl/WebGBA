@@ -102,7 +102,7 @@ function Stage({ s }) {
   const ref = useRef();
   useEffect(() => GBA.attachCanvas(ref.current), []);
   const { filter, scale, glow, turboSpeed, slot } = s.config.settings;
-  const w = scale === 'fit' ? 'min(94cqw, calc((100vh - 130px) * 1.5))' : `min(94cqw, ${240 * +scale}px)`;
+  const w = scale === 'fit' ? 'min(94cqw, calc((100dvh - 130px) * 1.5))' : `min(94cqw, ${240 * +scale}px)`;
   return html`
     <main className=${'stage' + (s.running ? ' live' : '') + (s.paused ? ' paused' : '')} data-filter=${filter}>
       <div className=${'glow' + (glow ? '' : ' off')} />
@@ -120,7 +120,7 @@ function Touch() {
   const mk = (k, label, cls = '') => {
     const up = (e) => { e.currentTarget.classList.remove('down'); GBA.touchSet(GBA.BTN[k], false); };
     return html`<button type="button" className=${cls} aria-label=${k}
-      onPointerDown=${(e) => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); e.currentTarget.classList.add('down'); GBA.touchSet(GBA.BTN[k], true); }}
+      onPointerDown=${(e) => { e.preventDefault(); try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) { /* Safari may not capture this pointer */ } e.currentTarget.classList.add('down'); GBA.touchSet(GBA.BTN[k], true); }}
       onPointerUp=${up} onPointerCancel=${up} onLostPointerCapture=${up} onContextMenu=${(e) => e.preventDefault()}>${label}</button>`;
   };
   return html`<div className="touch">
@@ -142,7 +142,7 @@ function GamesLayer({ s, onClose, onSettings }) {
         <header className="gh">
           <div><h2>Games</h2><small>${n ? `${n} game${n === 1 ? '' : 's'}` : 'WebGBA \u00B7 mGBA in your browser'}</small></div>
           <div className="gact">
-            <button type="button" ...${N} className="btn" onClick=${() => input.current.click()}><${Icon} n="upload" size=${16} /> Open ROM</button>
+            <button type="button" ...${N} className="btn" onClick=${() => { GBA.unlockAudio(); input.current.click(); }}><${Icon} n="upload" size=${16} /> Open ROM</button>
             <button type="button" ...${N} className="btn primary" onClick=${GBA.scanFolder}><${Icon} n="folder" size=${16} /> Scan folder</button>
             <button type="button" ...${N} className="btn ghost icon" aria-label="Settings" onClick=${onSettings}><${Icon} n="gear" size=${18} /></button>
             ${s.running && html`<button type="button" ...${N} className="btn ghost icon" aria-label="Close games" onClick=${onClose}><${Icon} n="close" size=${18} /></button>`}
@@ -160,7 +160,7 @@ function GamesLayer({ s, onClose, onSettings }) {
           </div>`; })}</div>`}
         ${n === 0 && html`<div className="empty">
           <button type="button" ...${N} className="folderbtn" onClick=${GBA.scanFolder}><${Icon} n="folder" size=${64} /><div><b>Scan folder</b><span>Pick the folder where your .gba games live</span></div></button>
-          <p>or <button type="button" className="link" onClick=${() => input.current.click()}>open a single ROM</button>, or just drop one here. Opened games are saved to this list.</p>
+          <p>or <button type="button" className="link" onClick=${() => { GBA.unlockAudio(); input.current.click(); }}>open a single ROM</button>, or just drop one here. Opened games are saved to this list.</p>
         </div>`}
         ${s.busy && html`<div className="busyv"><i /><span>${s.busy}</span></div>`}
       </section>
@@ -332,6 +332,7 @@ function App() {
       <${Stage} s=${s} />
       ${s.running && html`<${ControlsList} s=${s} />`}
       ${touchOn && s.running && !showLib && html`<${Touch} />`}
+      ${s.running && s.audioStatus !== 'ready' && html`<button type="button" className="audio-enable" onClick=${GBA.unlockAudio} aria-label="Enable game sound">${s.audioStatus === 'unavailable' ? 'Sound unavailable' : 'Tap to enable sound'}</button>`}
       <button type="button" className="gear" aria-label="Settings" title="Settings" onClick=${() => setTab(tab ? null : 'game')}><${Icon} n="gear" size=${20} /></button>
       <${Drawer} open=${!!tab} tab=${tab || 'game'} setTab=${setTab} onClose=${() => setTab(null)} s=${s} />
       ${showLib && html`<${GamesLayer} s=${s} onClose=${() => setLib(false)} onSettings=${() => setTab('game')} />`}
