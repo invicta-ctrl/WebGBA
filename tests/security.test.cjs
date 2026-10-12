@@ -118,3 +118,20 @@ test('content-addressed ROM IDs distinguish matching-header variants', async () 
   assert.equal(legacyRomId(a), legacyRomId(b));
   assert.notEqual(await romId(a), await romId(b));
 });
+
+test('invalid backup ZIP never writes to stored saves', async () => {
+  const archive = new Blob([zip('saves/ABCD.sav', Buffer.from([1,2,3]), 0, true)]);
+  let writes = 0;
+  const notifications = [];
+  const code = slice('async function importBackup(file) {', '/* -------------------------------------------------------------- drag and drop */');
+  const run = new Function('zipEntries','zipRead','store','Library','mergeConfig','commitConfig','set','toast','refreshLibrary','ROM_RE','SAVE_MAX','ROM_MAX','TextDecoder',
+    code + '\nreturn importBackup;');
+  const restore = run(zipEntries,zipRead,
+    { put: async () => { writes++; } },
+    { add: async () => { writes++; } },
+    (x) => x, () => {}, () => {}, (msg) => notifications.push(msg),
+    async () => {}, /\\.(gba|agb|bin|mb)$/i, 128*1024, 32*1024*1024, TextDecoder);
+  await restore(archive);
+  assert.equal(writes, 0);
+  assert.ok(notifications.some((msg) => /Restore failed:/.test(msg)));
+});
