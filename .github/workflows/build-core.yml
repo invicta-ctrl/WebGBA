@@ -32,3 +32,41 @@ jobs:
             core/mgba.wasm
           if-no-files-found: error
           retention-days: 7
+
+  publish:
+    needs: build
+    if: github.event_name == 'push' && github.ref_name == 'fix/safari-security-save-integrity' && !contains(github.event.head_commit.message, '[wasm]')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: hardened-mgba-core
+          path: rebuilt
+      - name: Verify reviewed artifact and update checksum
+        run: |
+          test "$(sha256sum rebuilt/mgba.js | cut -d' ' -f1)" = "513a26f8f0f018d38bb48c68a2ea9fd5e340e62947a909d5626c09944ebae2da"
+          test "$(sha256sum rebuilt/mgba.wasm | cut -d' ' -f1)" = "e8ce9d7534e54b25138f74343c772add6629f3263fa49424c6efccd33eaf36e7"
+          cp rebuilt/mgba.js core/mgba.js
+          cp rebuilt/mgba.wasm core/mgba.wasm
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("README.md")
+          s = p.read_text()
+          s = s.replace("07108af52f45b53943f76074102a86931cb096647447844ad2ddaadb4a2b36ea", "e8ce9d7534e54b25138f74343c772add6629f3263fa49424c6efccd33eaf36e7")
+          s = s.replace("**they are not active in the bundled `core/mgba.wasm` until that binary has been successfully rebuilt and its checksum updated**", "**the included `core/mgba.wasm` is rebuilt with these allocation checks, as recorded in the checksum above**")
+          p.write_text(s)
+          PY
+          git diff --check
+          git diff --stat -- core/mgba.js core/mgba.wasm README.md
+      - name: Publish the reviewed core to this feature branch only
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- core/mgba.js core/mgba.wasm README.md
+          if ! git diff --cached --quiet; then
+            git commit -m "build: include verified hardened mGBA core [wasm]"
+            git push origin HEAD:fix/safari-security-save-integrity
+          fi
