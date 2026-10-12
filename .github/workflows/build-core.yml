@@ -1,0 +1,34 @@
+name: Rebuild mGBA for verification
+on:
+  push:
+    branches: [fix/safari-security-save-integrity]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Emscripten toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y emscripten cmake make curl
+          sudo npm install --global acorn
+      - name: Compile mGBA WebAssembly from source
+        env:
+          NODE_PATH: /usr/local/lib/node_modules
+        run: bash build/build-core.sh
+      - name: Record checksums
+        run: |
+          sha256sum core/mgba.js core/mgba.wasm
+          git diff --stat -- core/mgba.js core/mgba.wasm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hardened-mgba-core
+          path: |
+            core/mgba.js
+            core/mgba.wasm
+          if-no-files-found: error
+          retention-days: 7
