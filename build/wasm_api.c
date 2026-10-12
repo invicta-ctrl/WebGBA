@@ -18,6 +18,7 @@
 #define SAVE_CAP 0x20000
 #define SAMPLE_RATE 48000
 #define AUDIO_CAP 8192
+#define STATE_CAP (16 * 1024 * 1024)
 
 static struct mCore* core = NULL;
 static uint32_t* video = NULL;
@@ -53,7 +54,9 @@ EMSCRIPTEN_KEEPALIVE void wg_free(void* p) { free(p); }
 EMSCRIPTEN_KEEPALIVE void wg_set_bios(const uint8_t* data, size_t size) {
 	free(biosCopy); biosCopy = NULL; biosSize = 0;
 	if (data && size) {
+		if (size != 16384) return;
 		biosCopy = malloc(size);
+		if (!biosCopy) return;
 		memcpy(biosCopy, data, size);
 		biosSize = size;
 	}
@@ -62,9 +65,11 @@ EMSCRIPTEN_KEEPALIVE void wg_set_bios(const uint8_t* data, size_t size) {
 EMSCRIPTEN_KEEPALIVE void wg_set_pending_save(const uint8_t* data, size_t size) {
 	free(pendingSave); pendingSave = NULL; pendingSaveSize = 0;
 	if (data && size) {
+		if (size > SAVE_CAP) return;
 		pendingSave = malloc(size);
+		if (!pendingSave) return;
 		memcpy(pendingSave, data, size);
-		pendingSaveSize = size > SAVE_CAP ? SAVE_CAP : size;
+		pendingSaveSize = size;
 	}
 }
 
@@ -81,6 +86,7 @@ EMSCRIPTEN_KEEPALIVE int wg_load_rom(const uint8_t* data, size_t size) {
 	core->init(core);
 
 	video = calloc(VID_W * VID_H, sizeof(uint32_t));
+	if (!video) { unload(); return 0; }
 	core->setVideoBuffer(core, (color_t*) video, VID_W);
 
 	core->setAudioBufferSize(core, 2048);
@@ -88,6 +94,7 @@ EMSCRIPTEN_KEEPALIVE int wg_load_rom(const uint8_t* data, size_t size) {
 	blip_set_rates(core->getAudioChannel(core, 1), core->frequency(core), SAMPLE_RATE);
 
 	struct VFile* rom = VFileFromMemory(romCopy, size);
+	if (!rom) { unload(); return 0; }
 	if (!core->loadROM(core, rom)) {
 		rom->close(rom);
 		unload();
@@ -95,17 +102,20 @@ EMSCRIPTEN_KEEPALIVE int wg_load_rom(const uint8_t* data, size_t size) {
 	}
 	if (biosCopy) {
 		struct VFile* bios = VFileFromMemory(biosCopy, biosSize);
-		if (!core->loadBIOS(core, bios, 0)) {
+		if (bios && !core->loadBIOS(core, bios, 0)) {
 			bios->close(bios);
 		}
 	}
 	saveBuf = malloc(SAVE_CAP);
+	if (!saveBuf) { unload(); return 0; }
 	memset(saveBuf, 0xFF, SAVE_CAP);
 	if (pendingSave) {
 		memcpy(saveBuf, pendingSave, pendingSaveSize);
 	}
 	struct VFile* sav = VFileFromMemory(saveBuf, SAVE_CAP);
+	if (!sav) { unload(); return 0; }
 	core->loadSave(core, sav);
+	free(pendingSave); pendingSave = NULL; pendingSaveSize = 0;
 	core->reset(core);
 	return 1;
 }
@@ -143,8 +153,10 @@ EMSCRIPTEN_KEEPALIVE void wg_title(char* out) {
 EMSCRIPTEN_KEEPALIVE int wg_state_save(void) {
 	if (!core) return 0;
 	stateLen = core->stateSize(core);
+	if (!stateLen || stateLen > STATE_CAP) return 0;
 	free(stateBuf);
 	stateBuf = calloc(1, stateLen);
+	if (!stateBuf) { stateLen = 0; return 0; }
 	if (!core->saveState(core, stateBuf)) {
 		return 0;
 	}
@@ -153,8 +165,9 @@ EMSCRIPTEN_KEEPALIVE int wg_state_save(void) {
 EMSCRIPTEN_KEEPALIVE uint8_t* wg_state_ptr(void) { return stateBuf; }
 
 EMSCRIPTEN_KEEPALIVE int wg_state_load(const uint8_t* data, size_t size) {
-	if (!core || size != core->stateSize(core)) return 0;
+	if (!core || !data || size > STATE_CAP || size != core->stateSize(core)) return 0;
 	void* tmp = malloc(size);
+	if (!tmp) return 0;
 	memcpy(tmp, data, size);
 	int ok = core->loadState(core, tmp) ? 1 : 0;
 	free(tmp);
