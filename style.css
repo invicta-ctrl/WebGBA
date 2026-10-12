@@ -154,8 +154,37 @@ textarea { width: 100%; background: var(--s1); border: 1px solid var(--line); bo
 .mid { grid-area: mid; display: flex; flex-direction: column; gap: 8px; align-self: end; } .mid button { padding: 7px 14px; font-size: 12px; border-radius: 20px; }
 .face { grid-area: fc; display: flex; gap: 12px; justify-self: end; align-items: flex-end; }
 .face button { width: 62px; height: 62px; border-radius: 50%; font-weight: 700; } .face button:first-child { margin-bottom: -4px; } .face button:last-child { margin-bottom: 26px; }
-.touchon .stage { align-items: start; padding-top: 8vh; } .touchon .col { --w: min(94vw, 720px) !important; }
+.touchon .stage { align-items: start; padding-top: min(8dvh, 56px); } .touchon .col { --w: min(94vw, 720px, calc((100dvh - 250px) * 1.5)) !important; }
 
+.audio-enable {
+  position: fixed; left: 50%; top: calc(10px + env(safe-area-inset-top));
+  transform: translateX(-50%); z-index: 45; border: 1px solid var(--line);
+  border-radius: 999px; padding: 10px 15px; background: var(--s2);
+  color: var(--text); white-space: nowrap; font-size: 13px;
+}
+@media (max-width: 480px) and (orientation: portrait) {
+  .touch { padding-inline: 8px; gap: 4px; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
+  .dp { grid-template-columns: repeat(3, clamp(32px, 9vw, 44px)); grid-template-rows: repeat(3, clamp(32px, 9vw, 44px)); }
+  .face { gap: 4px; }
+  .face button { width: clamp(40px, 12vw, 52px); height: clamp(40px, 12vw, 52px); }
+  .mid button { padding: 6px 5px; font-size: 10px; }
+  .sh button { width: 32%; }
+  .touchon .col { --w: min(94vw, calc((100dvh - 260px) * 1.5)) !important; }
+}
+@media (orientation: landscape) and (max-height: 540px) and (pointer: coarse) {
+  .touch { inset: 0; bottom: auto; height: 100dvh; align-items: center; display: block; pointer-events: none; padding: env(safe-area-inset-top) max(12px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(12px, env(safe-area-inset-left)); }
+  .touch button { pointer-events: auto; }
+  .touch .sh { position: absolute; top: max(10px, env(safe-area-inset-top)); left: max(12px, env(safe-area-inset-left)); right: max(12px, env(safe-area-inset-right)); }
+  .touch .sh button { width: 20%; padding: 6px; }
+  .touch .dp { position: absolute; left: max(12px, env(safe-area-inset-left)); bottom: max(8px, env(safe-area-inset-bottom)); grid-template-columns: repeat(3, min(10dvh, 47px)); grid-template-rows: repeat(3, min(10dvh, 47px)); }
+  .touch .mid { position: absolute; left: 50%; bottom: max(6px, env(safe-area-inset-bottom)); transform: translateX(-50%); flex-direction: row; }
+  .touch .face { position: absolute; right: max(12px, env(safe-area-inset-right)); bottom: max(18px, env(safe-area-inset-bottom)); }
+  .touch .face button { width: min(13dvh, 58px); height: min(13dvh, 58px); }
+  .touchon .stage { padding-top: 0; place-items: center; align-items: center; }
+  .touchon .col { --w: min(52vw, calc((100dvh - 32px) * 1.5)) !important; }
+  .gear { top: max(10px, env(safe-area-inset-top)); right: max(10px, env(safe-area-inset-right)); }
+  .audio-enable { top: max(8px, env(safe-area-inset-top)); }
+}
 /* ---------- misc ---------- */
 .toast { position: fixed; left: 50%; bottom: calc(26px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 60; max-width: 90vw; padding: 9px 16px; border-radius: 13px;
   background: rgba(32,32,46,.92); backdrop-filter: blur(14px); border: 1px solid var(--line); animation: toast 2.6s var(--ease) both; pointer-events: none; }
