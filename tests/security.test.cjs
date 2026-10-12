@@ -130,7 +130,7 @@ test('invalid backup ZIP never writes to stored saves', async () => {
     { put: async () => { writes++; } },
     { add: async () => { writes++; } },
     (x) => x, () => {}, () => {}, (msg) => notifications.push(msg),
-    async () => {}, /\\.(gba|agb|bin|mb)$/i, 128*1024, 32*1024*1024, TextDecoder);
+    async () => {}, /\.(gba|agb|bin|mb)$/i, 128*1024, 32*1024*1024, TextDecoder);
   await restore(archive);
   assert.equal(writes, 0);
   assert.ok(notifications.some((msg) => /Restore failed:/.test(msg)));
