@@ -185,6 +185,8 @@ const Core = {
   load(rom, save, bios) {
     const m = this.m;
     if (bios) { const p = this.put(bios); m._wg_set_bios(p, bios.length); m._wg_free(p); } else m._wg_set_bios(0, 0);
+    if (save && save.length > SAVE_MAX) throw new Error('Stored save exceeds 128 KB');
+    if (bios && bios.length !== 16384) throw new Error('Invalid BIOS size');
     if (save) { const p = this.put(save); m._wg_set_pending_save(p, save.length); m._wg_free(p); } else m._wg_set_pending_save(0, 0);
     const p = this.put(rom), ok = m._wg_load_rom(p, rom.length);
     m._wg_free(p);
