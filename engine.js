@@ -585,9 +585,12 @@ async function startRom(rom, name, opts = {}) {
     try { save = await store.get('save', id) || await store.get('save', legacyId); } catch (e) { console.warn(e); }
   }
   try { const b = await idbGet('bios:gba'); bios = b ? new Uint8Array(b) : null; } catch (e) { /* optional */ }
-  if (!Core.load(rom, save, bios)) {
+  let loaded = false;
+  try { loaded = Core.load(rom, save, bios); }
+  catch (e) { console.error('mGBA load failed', e); }
+  if (!loaded) {
     set({ running: false, paused: false, id: '', title: '', romName: '' });
-    toast('mGBA rejected this ROM'); return false;
+    toast('mGBA could not load this ROM'); return false;
   }
   Object.assign(R, { lastRom: { bytes: rom, name }, legacyId, lastSave: save, acc: 0, frames: 0,
     fpsAt: performance.now(), dec: { n: 0, l: 0, r: 0 }, overlayPaused: false, autoPaused: false });
@@ -743,11 +746,12 @@ async function importSav(file) {
     const b = new Uint8Array(await file.arrayBuffer());
     // Keep a retrievable copy of the previous in-game save before replacing it.
     const prior = Core.saveData();
-    if (prior && !isBlank(prior)) download((state.title || 'game') + '-before-import.sav', prior);
+    const hasPrevious = !!prior && !isBlank(prior);
+    if (hasPrevious) download((state.title || 'game') + '-before-import.sav', prior);
     await writeSave(state.id, b);
     if (!await startRom(R.lastRom.bytes, R.lastRom.name, { skipOutgoingSave: true, saveOverride: b }))
       throw new Error('emulator rejected imported save');
-    toast('Save imported; previous save downloaded as a backup');
+    toast(hasPrevious ? 'Save imported; backup download requested' : 'Save imported');
   } catch (e) { toast('Import failed: ' + e.message); }
   finally { R.importing = false; if (wasPaused && state.running) set({ paused: true }); }
 }
@@ -797,20 +801,29 @@ async function importBackup(file) {
   const n = { saves: 0, states: 0, roms: 0, skipped: 0 };
   try {
     const ents = await zipEntries(file); let cfg = null, i = 0;
+    // Validate every archive member before mutating any save, state, or ROM record.
+    for (const e of ents) {
+      if (e.name.endsWith('/')) continue;
+      set({ busy: `Checking backup... ${++i}/${ents.length}` });
+      await zipRead(file, e);
+    }
+    const settingsEntry = ents.find((e) => e.name === 'settings.json');
+    if (settingsEntry) cfg = mergeConfig(JSON.parse(new TextDecoder().decode(await zipRead(file, settingsEntry))));
+    i = 0;
     for (const e of ents) {
       set({ busy: `Restoring ${++i}/${ents.length}` });
       if (e.name.startsWith('saves/') && e.usize > SAVE_MAX) throw new Error('Save in backup exceeds 128 KB');
       if (e.name.startsWith('roms/') && e.usize > ROM_MAX) throw new Error('Game in backup exceeds 32 MB');
       if (e.name.endsWith('/') || e.name.includes('..') || e.name.startsWith('/')) continue;
       let m;
-      if (e.name === 'settings.json') cfg = JSON.parse(new TextDecoder().decode(await zipRead(file, e)));
+      if (e.name === 'settings.json') continue;
       else if ((m = /^saves\/([A-Za-z0-9_.-]{1,96})\.sav$/.exec(e.name))) { await store.put('save', m[1], await zipRead(file, e)); n.saves++; }
       else if ((m = /^states\/([A-Za-z0-9_.-]{1,96})\/([A-Za-z0-9_.-]{1,16})\.state$/.exec(e.name))) { await store.put('state', `${m[1]}/${m[2]}`, await zipRead(file, e)); n.states++; }
       else if ((m = /^roms\/([^/\\]+)$/.exec(e.name))) {
         if (ROM_RE.test(m[1])) { try { await Library.add(m[1], await zipRead(file, e)); n.roms++; } catch (err) { n.skipped++; } } else n.skipped++;
       }
     }
-    if (cfg) commitConfig(mergeConfig(cfg));
+    if (cfg) commitConfig(cfg);
     await refreshLibrary();
     toast(`Restored ${n.saves} saves, ${n.states} states, ${n.roms} games${n.skipped ? ` (${n.skipped} games skipped)` : ''}`);
   } catch (e) { toast('Restore failed: ' + e.message); } finally { set({ busy: null }); }
